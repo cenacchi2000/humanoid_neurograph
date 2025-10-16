@@ -1,0 +1,5 @@
+streamlit>=1.36
+opencv-python
+numpy
+plotly
+mediapipe==0.10.14
