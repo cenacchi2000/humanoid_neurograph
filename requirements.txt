@@ -1,7 +1,14 @@
-streamlit>=1.36
-opencv-python-headless==4.10.0.84
-numpy==1.26.4
-plotly>=5.20
-mediapipe==0.10.14
-protobuf>=3.20.3,<5
+# Streamlit UI
+streamlit>=1.36,<1.51
 
+# OpenCV without GUI libs (works in Streamlit Cloud)
+opencv-python-headless==4.10.0.84
+
+# Numpy version compatible with Py3.11 and opencv/mediapipe wheels
+numpy==1.26.4
+
+# Plotly — 6.x works on 3.11; pin below 7 to stay safe with Streamlit themes
+plotly>=5.20,<7
+
+# MediaPipe (requires <= Py3.11)
+mediapipe==0.10.14
