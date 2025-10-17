@@ -76,6 +76,19 @@ class RiskSummary:
     alz_mci: float = 0.0
     ftd_exec: float = 0.0
 
+@dataclass
+class RhythmPhaseConfig:
+    name: str
+    duration: float
+    target_hz: float
+    instruction: str
+
+@dataclass
+class TapEvent:
+    ts: float
+    phase: int
+    y_px: float
+
 def _centroid(box: Tuple[int,int,int,int]) -> Tuple[float,float]:
     x,y,w,h = box
     return (x + 0.5*w, y + 0.5*h)
@@ -101,9 +114,19 @@ class GamesPro:
         self.rhythm_roi = None
         self.rhythm_peaks: List[float] = []
         self.rhythm_last_y = None
+        self.rhythm_last_peak_y = None
         self.rhythm_deriv_ts: List[TrialLog] = []
+        self.rhythm_deriv_all: List[TrialLog] = []
         self.rhythm_active = False
         self.rhythm_win = 3.0
+        self.rhythm_phases: List[RhythmPhaseConfig] = [
+            RhythmPhaseConfig("Warm-up", 4.0, 1.4, "Light taps to get started"),
+            RhythmPhaseConfig("Paced", 8.0, 2.0, "Match a steady tapping tempo"),
+            RhythmPhaseConfig("Burst", 6.0, 2.6, "Accelerate; keep taps rhythmic"),
+        ]
+        self.rhythm_phase_idx = -1
+        self.rhythm_phase_start = 0.0
+        self.rhythm_taps: List[TapEvent] = []
 
         # Anti-saccade
         self.anti = TestResult()
@@ -151,8 +174,13 @@ class GamesPro:
         self.rhythm = TestResult(started=True, t0=self.now())
         self.rhythm_peaks.clear()
         self.rhythm_deriv_ts.clear()
+        self.rhythm_deriv_all.clear()
+        self.rhythm_taps.clear()
         self.rhythm_last_y = None
+        self.rhythm_last_peak_y = None
         self.rhythm_active = True
+        self.rhythm_phase_idx = 0
+        self.rhythm_phase_start = self.rhythm.t0
         w,h = int(self.W*0.28), int(self.H*0.45)
         x0,y0 = self.W - w - 16, (self.H-h)//2
         self.rhythm_roi = (x0,y0,w,h)
@@ -161,28 +189,126 @@ class GamesPro:
         if not self.rhythm.started or self.rhythm.finished: return
         self.rhythm.finished = True
         self.rhythm.t_end = self.now()
-        hz = _hz_from_peaks(self.rhythm_peaks)
-        isi_std = _safe_std(np.diff(np.array(self.rhythm_peaks))) if len(self.rhythm_peaks)>2 else 0.0
-        duration = self.rhythm.t_end - self.rhythm.t0
-        self.rhythm.metrics = {"duration_s": duration, "tapping_hz": hz,
-                               "isi_std_s": float(isi_std), "peaks_n": float(len(self.rhythm_peaks))}
+        self.rhythm_active = False
+        duration = max(1e-3, self.rhythm.t_end - self.rhythm.t0)
+        tap_times = [tap.ts for tap in self.rhythm_taps] or list(self.rhythm_peaks)
+        tap_times.sort()
+        n_taps = len(tap_times)
+        overall_hz = _hz_from_peaks(tap_times) if n_taps >= 2 else float(n_taps) / duration
+        isi_vals = np.diff(np.array(tap_times)) if n_taps >= 2 else np.array([])
+        overall_isi_std = _safe_std(isi_vals) if isi_vals.size else 0.0
+        cadence_cv = float(np.std(isi_vals) / max(1e-3, np.mean(isi_vals))) if isi_vals.size else 0.0
+
+        fatigue_ratio = 1.0
+        if tap_times:
+            midpoint = self.rhythm.t0 + duration * 0.5
+            early = sum(1 for ts in tap_times if ts <= midpoint)
+            late = n_taps - early
+            fatigue_ratio = float(late) / max(1.0, float(early))
+
+        tremor_vals = np.array([log.value for log in self.rhythm_deriv_all], dtype=float)
+        tremor_rms = float(np.sqrt(np.mean(np.square(tremor_vals)))) if tremor_vals.size else 0.0
+
+        phase_details = []
+        for idx, phase in enumerate(self.rhythm_phases):
+            taps = [tap for tap in self.rhythm_taps if tap.phase == idx]
+            phase_times = [tap.ts for tap in taps]
+            taps_n = len(phase_times)
+            if taps_n >= 2:
+                phase_hz = _hz_from_peaks(phase_times)
+                phase_isi_std = _safe_std(np.diff(np.array(phase_times)))
+            elif taps_n == 1:
+                phase_hz = float(taps_n) / max(phase.duration, 1e-3)
+                phase_isi_std = 0.0
+            else:
+                phase_hz = 0.0
+                phase_isi_std = 0.0
+            accuracy = 1.0 - min(1.0, abs(phase_hz - phase.target_hz) / max(phase.target_hz, 1e-3))
+            completion = float(taps_n) / max(1e-3, phase.target_hz * phase.duration)
+            phase_details.append({
+                "name": phase.name,
+                "hz": float(phase_hz),
+                "isi_std": float(phase_isi_std),
+                "accuracy": float(accuracy),
+                "completion": float(completion),
+                "taps": float(taps_n),
+                "target": float(phase.target_hz),
+            })
+
+        phase_accuracy_mean = float(np.mean([p["accuracy"] for p in phase_details])) if phase_details else 0.0
+        phase_error_mean = float(np.mean([abs(p["hz"] - p["target"]) / max(p["target"], 1e-3) for p in phase_details])) if phase_details else 0.0
+
+        self.rhythm.metrics = {
+            "duration_s": duration,
+            "overall_tapping_hz": float(overall_hz),
+            "overall_isi_std_s": float(overall_isi_std),
+            "cadence_cv": float(cadence_cv),
+            "fatigue_ratio": float(fatigue_ratio),
+            "tremor_rms_px": float(tremor_rms),
+            "phase_accuracy_mean": float(phase_accuracy_mean),
+            "tap_count": float(n_taps),
+        }
+        for idx, detail in enumerate(phase_details, start=1):
+            base = f"phase{idx}"
+            self.rhythm.metrics[f"{base}_taps"] = detail["taps"]
+            self.rhythm.metrics[f"{base}_hz"] = detail["hz"]
+            self.rhythm.metrics[f"{base}_isi_std_s"] = detail["isi_std"]
+            self.rhythm.metrics[f"{base}_target_hz"] = detail["target"]
+            self.rhythm.metrics[f"{base}_completion"] = min(1.0, detail["completion"])
+
+        self.rhythm.notes.append(f"Overall cadence {overall_hz:.2f} Hz with variability CV {cadence_cv:.2f}.")
+        for detail in phase_details:
+            status = "on pace" if detail["accuracy"] > 0.82 else ("slow" if detail["hz"] < detail["target"] else "fast")
+            self.rhythm.notes.append(
+                f"{detail['name']}: {detail['hz']:.2f} Hz vs target {detail['target']:.2f} Hz ({int(detail['taps'])} taps, {status})."
+            )
+        self.rhythm.notes.append(f"Fatigue ratio (late/early taps): {fatigue_ratio:.2f}; tremor RMS: {tremor_rms:.2f} px.")
+
         vr = 0.0
-        if hz < 1.2: vr += 0.5
-        if isi_std > 0.12: vr += 0.4
+        if overall_hz < 1.6: vr += 0.25
+        if overall_hz < 1.2: vr += 0.20
+        if overall_isi_std > 0.12: vr += 0.20
+        if cadence_cv > 0.18: vr += 0.20
+        if fatigue_ratio < 0.75: vr += 0.10
+        if tremor_rms > 3.5: vr += 0.10
+        if phase_error_mean > 0.25: vr += 0.15
         self.risk.parkinson = min(1.0, vr)
 
     def update_rhythm(self, frame_bgr, meta):
         if not self.rhythm_active or not self.rhythm.started: return
+        if not self.rhythm_roi: return
         t = self.now()
+        if self.rhythm_phase_idx < 0:
+            self.rhythm_phase_idx = 0
+            self.rhythm_phase_start = t
+        if self.rhythm_phase_idx >= len(self.rhythm_phases):
+            self.stop_rhythm()
+            return
+        phase = self.rhythm_phases[self.rhythm_phase_idx]
+        phase_elapsed = t - self.rhythm_phase_start
+        if phase_elapsed >= phase.duration:
+            self.rhythm_phase_idx += 1
+            self.rhythm_phase_start = t
+            self.rhythm_last_y = None
+            self.rhythm_last_peak_y = None
+            self.rhythm_deriv_ts.clear()
+            if self.rhythm_phase_idx >= len(self.rhythm_phases):
+                self.stop_rhythm()
+                return
+            phase = self.rhythm_phases[self.rhythm_phase_idx]
+            phase_elapsed = 0.0
         x0,y0,w,h = self.rhythm_roi
         roi = frame_bgr[y0:y0+h, x0:x0+w]
+        if roi.size == 0: return
         gry = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         col = gry.mean(axis=1)
         y = int(np.argmax(cv2.GaussianBlur(col, (9,1), 0)))
         if self.rhythm_last_y is None: self.rhythm_last_y = y
         dy = y - self.rhythm_last_y
         self.rhythm_last_y = y
-        self.rhythm_deriv_ts.append(TrialLog(t, float(dy)))
+        log = TrialLog(t, float(dy))
+        self.rhythm_deriv_ts.append(log)
+        self.rhythm_deriv_all.append(log)
         while self.rhythm_deriv_ts and (t - self.rhythm_deriv_ts[0].ts) > self.rhythm_win:
             self.rhythm_deriv_ts.pop(0)
         if len(self.rhythm_deriv_ts) >= 3:
@@ -191,9 +317,36 @@ class GamesPro:
             if d1 > 0 and d2 <= 0:
                 if (not self.rhythm_peaks) or (t - self.rhythm_peaks[-1]) > 0.25:
                     self.rhythm_peaks.append(t)
+                    self.rhythm_taps.append(TapEvent(t, self.rhythm_phase_idx, float(y)))
+                    self.rhythm_last_peak_y = y
+
+        phase_timestamps = [tap.ts for tap in self.rhythm_taps if tap.phase == self.rhythm_phase_idx]
+        if len(phase_timestamps) >= 2:
+            phase_hz = _hz_from_peaks(phase_timestamps)
+        elif len(phase_timestamps) == 1 and phase_elapsed > 0:
+            phase_hz = 1.0 / max(phase_elapsed, 1e-3)
+        else:
+            phase_hz = 0.0
+        prog = min(1.0, phase_elapsed / max(phase.duration, 1e-3))
+        remaining = max(0.0, phase.duration - phase_elapsed)
+
         cv2.rectangle(frame_bgr, (x0,y0), (x0+w,y0+h), (70,230,230), 2)
-        cv2.putText(frame_bgr, "Finger Rhythm: tap inside box", (x0, y0-8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180,255,255), 2, cv2.LINE_AA)
+        title_y = max(22, y0 - 16)
+        cv2.putText(frame_bgr,
+                    f"Finger Rhythm {self.rhythm_phase_idx+1}/{len(self.rhythm_phases)}",
+                    (x0, title_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180,255,255), 2, cv2.LINE_AA)
+        instr_y = min(self.H - 12, y0 + 18)
+        cv2.putText(frame_bgr,
+                    f"{phase.name}: {phase.instruction}",
+                    (x0 + 6, instr_y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200,240,255), 2, cv2.LINE_AA)
+        bar_y0 = min(self.H - 12, y0 + h + 4)
+        bar_y1 = min(self.H - 6, bar_y0 + 6)
+        cv2.rectangle(frame_bgr, (x0, bar_y0), (x0 + w, bar_y1), (80, 90, 90), 1)
+        cv2.rectangle(frame_bgr, (x0, bar_y0), (x0 + int(w * prog), bar_y1), (70, 230, 230), -1)
+        stats_y = min(self.H - 8, bar_y1 + 12)
+        cv2.putText(frame_bgr,
+                    f"Target {phase.target_hz:.1f} Hz | current {phase_hz:.1f} Hz | {remaining:.1f}s",
+                    (x0, stats_y), cv2.FONT_HERSHEY_SIMPLEX, 0.47, (180,255,255), 2, cv2.LINE_AA)
 
     # ---- Test 2: Anti-saccade
     def start_anti(self):
