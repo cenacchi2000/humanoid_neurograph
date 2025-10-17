@@ -1,4 +1,4 @@
-# 🧠 Humanoid NeuroGraph  
+# Humanoid NeuroGraph  
 **Live Multimodal Neuro-Perceptual Analysis**
 
 A real-time Streamlit platform for analyzing facial expressions, pupil reactivity, lips and articulation, finger and body pose, tremor stability, and deep demographic attributes (age, sex, glasses, beard, mask).  
@@ -6,7 +6,7 @@ Developed for research in **human-robot perception**, **affective computing**, a
 
 ---
 
-## 🚀 Features
+## Features
 
 - **Face & Iris Tracking** – gaze, blink, and pupil dilation analysis  
 - **Lips & Articulation** – live lip motion and speech articulation overlay  
@@ -20,9 +20,9 @@ Developed for research in **human-robot perception**, **affective computing**, a
 
 ---
 
-## 🧩 Installation (macOS & Windows)
+## Installation (macOS & Windows)
 
-### ✅ Prerequisites
+### Prerequisites
 - **Python 3.10 or 3.11**  
   (MediaPipe and ONNXRuntime are not yet stable on 3.12/3.13)
 - **Camera access** enabled in OS settings
@@ -30,7 +30,7 @@ Developed for research in **human-robot perception**, **affective computing**, a
 
 ---
 
-### 🧠 macOS Setup
+### macOS Setup
 
 ```bash
 # 1. Clone
